@@ -238,12 +238,28 @@ class Player:
     def _sync_search_and_extract(self, query):
         """동기식 검색 및 추출 (별도 스레드용)"""
         try:
-            # asyncio 이벤트 루프 생성
+            # 새로운 이벤트 루프와 세션 생성
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
+            async def search_with_new_session():
+                # 새로운 aiohttp 세션 생성
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=8)
+                ) as session:
+                    # 임시로 세션 교체
+                    original_session = self.session
+                    self.session = session
+                    
+                    try:
+                        result = await self.fast_search_and_extract(query)
+                        return result
+                    finally:
+                        # 원래 세션 복구
+                        self.session = original_session
+            
             try:
-                return loop.run_until_complete(self.fast_search_and_extract(query))
+                return loop.run_until_complete(search_with_new_session())
             finally:
                 loop.close()
                 
