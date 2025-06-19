@@ -102,11 +102,6 @@ class Player:
             self._cache = {}
             logger.info("📁 새로운 캐시 파일 생성 (영구 보관)")
 
-    async def save_cache(self):
-        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(self._cache, f, ensure_ascii=False, indent=2)
-        logger.info(f"💾 캐시 저장 완료: {len(self._cache)}개 항목")
-
     def get_url_cache_key(self, video_url):
         try:
             if "youtube.com/watch?v=" in video_url:
@@ -483,8 +478,7 @@ class Player:
                     # 재생 시작
                     try:
                         source = discord.FFmpegPCMAudio(
-                            track["stream_url"], 
-                            executable="/usr/bin/ffmpeg",
+                            track["stream_url"],
                             **FFMPEG_OPTIONS
                         )
                         
