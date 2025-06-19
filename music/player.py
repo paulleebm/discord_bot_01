@@ -94,22 +94,33 @@ class Player:
             raise
 
     async def load_cache(self):
-        """캐시 파일 로드 - 영구 보관 버전"""
-        try:
-            if os.path.exists(CACHE_FILE):
-                with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                    cache_data = json.load(f)
-                
-                self._cache = cache_data
-                logger.info(f"📁 캐시 로드 완료: {len(self._cache)}개 항목 (영구 보관)")
-            else:
-                self._cache = {}
-                logger.info("📁 새로운 캐시 파일 생성 (영구 보관)")
-                
-        except Exception as e:
-            logger.error(f"❌ 캐시 로드 실패: {e}")
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                self._cache = json.load(f)
+            logger.info(f"📁 캐시 로드 완료: {len(self._cache)}개 항목 (영구 보관)")
+        else:
             self._cache = {}
+            logger.info("📁 새로운 캐시 파일 생성 (영구 보관)")
 
+    async def save_cache(self):
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(self._cache, f, ensure_ascii=False, indent=2)
+        logger.info(f"💾 캐시 저장 완료: {len(self._cache)}개 항목")
+
+    def get_url_cache_key(self, video_url):
+        try:
+            if "youtube.com/watch?v=" in video_url:
+                video_id = video_url.split("watch?v=")[1].split("&")[0]
+            elif "youtu.be/" in video_url:
+                video_id = video_url.split("youtu.be/")[1].split("?")[0]
+            else:
+                import hashlib
+                video_id = hashlib.md5(video_url.encode()).hexdigest()[:11]
+            return f"url_{video_id}"
+        except Exception:
+            import hashlib
+            return f"url_{hashlib.md5(video_url.encode()).hexdigest()[:11]}"
+        
     async def save_cache(self):
         """캐시 파일 저장"""
         try:
@@ -271,60 +282,44 @@ class Player:
             return None, None
 
     async def fast_search_and_extract(self, query):
-        """초고속 검색 및 정보 추출 - URL 기반 캐시"""
-        try:
-            # 1단계: URL 획득 (빠름)
-            if "youtube.com/watch" in query or "youtu.be/" in query:
-                video_url = query
-            else:
-                video_url = await self.lightning_search(query)
-                if not video_url:
-                    return None, None
-            
-            # 2단계: URL을 캐시 키로 사용하여 정보 확인
-            cache_key = self.get_url_cache_key(video_url)
-            
-            if cache_key in self._cache:
-                cached_data = self._cache[cache_key]
-                url = cached_data['track_info'].get('url', '')
-                if 'c=TVHTML5' in url or 'googlevideo.com' in url and 'signature' not in url:
-                    logger.warning(f"⚠️ 무효한 캐시 URL 감지, 재추출 시도: {url}")
-                    del self._cache[cache_key]  # 무효화
-                else:
-                    cached_data['play_count'] = cached_data.get('play_count', 0) + 1
-                    cached_data['last_played'] = datetime.now().isoformat()
-                    logger.info(f"⚡ URL 캐시 사용 ({cached_data['play_count']}회째): {cached_data['track_info']['title'][:30]}")
-                    return video_url, cached_data['track_info']
-
-            
-            # 3단계: 캐시에 없으면 정보 추출 (느림)
-            logger.info(f"🔄 새로운 URL 정보 추출: {video_url}")
-            track_info = await self.lightning_extract(video_url)
-            if not track_info:
+        if "youtube.com/watch" in query or "youtu.be/" in query:
+            video_url = query
+        else:
+            video_url = await self.lightning_search(query)
+            if not video_url:
                 return None, None
-            
-            # 4단계: URL 기반으로 캐시 저장 (영구 보관)
-            cache_data = {
-                'track_info': track_info,
-                'cached_at': datetime.now().isoformat(),
-                'original_query': query,  # 디버깅용
-                'video_url': video_url,
-                'play_count': 1  # 재생 횟수 추가
-            }
-            
-            self._cache[cache_key] = cache_data
-            
-            # 주기적 저장
-            if len(self._cache) % 5 == 0:
-                await self.save_cache()
-            
-            logger.info(f"📦 URL 캐시 저장: {track_info['title'][:30]}")
-            return video_url, track_info
-            
-        except Exception as e:
-            logger.error(f"❌ 빠른 추출 실패: {e}")
+
+        cache_key = self.get_url_cache_key(video_url)
+        if cache_key in self._cache:
+            cached_data = self._cache[cache_key]
+            url = cached_data['track_info'].get('url', '')
+            if any(client in url for client in ['c=TVHTML5', 'c=WEB_REMIX', 'c=ANDROID', 'c=WEB']):
+                logger.warning(f"⚠️ 무효한 캐시 URL 감지, 재추출 시도: {url}")
+                del self._cache[cache_key]
+            else:
+                cached_data['play_count'] = cached_data.get('play_count', 0) + 1
+                cached_data['last_played'] = datetime.now().isoformat()
+                logger.info(f"⚡ URL 캐시 사용 ({cached_data['play_count']}회째): {cached_data['track_info']['title'][:30]}")
+                return video_url, cached_data['track_info']
+
+        logger.info(f"🔄 새로운 URL 정보 추출: {video_url}")
+        track_info = await self.lightning_extract(video_url)
+        if not track_info:
             return None, None
 
+        cache_data = {
+            'track_info': track_info,
+            'cached_at': datetime.now().isoformat(),
+            'original_query': query,
+            'video_url': video_url,
+            'play_count': 1
+        }
+        self._cache[cache_key] = cache_data
+        if len(self._cache) % 5 == 0:
+            await self.save_cache()
+        logger.info(f"📦 URL 캐시 저장: {track_info['title'][:30]}")
+        return video_url, track_info 
+    
     def get_url_cache_key(self, video_url):
         """URL에서 캐시 키 추출"""
         try:
@@ -346,80 +341,63 @@ class Player:
             return f"url_{hashlib.md5(video_url.encode()).hexdigest()[:11]}"
 
     async def lightning_extract(self, url):
-        """초고속 정보 추출 - 성공한 옵션 사용"""
         loop = asyncio.get_event_loop()
-        
         try:
-            
             with YoutubeDL(FAST_YDL_OPTIONS) as ydl:
-                # 타임아웃을 15초로 늘림
                 info = await asyncio.wait_for(
                     loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False)),
                     timeout=15.0
                 )
-                
                 if not info or not info.get('url'):
                     logger.error(f"❌ 스트림 URL 없음: {url}")
                     return None
-                
                 logger.info(f"⚡ 빠른 추출 성공: {info.get('title', 'Unknown')[:30]}")
                 return {
                     'title': info.get('title', 'Unknown Title'),
                     'duration': info.get('duration', 0),
                     'id': info.get('id', ''),
                     'uploader': info.get('uploader', 'Unknown'),
-                    'url': info.get('url'),
+                    'url': info.get('url')
                 }
-                
         except asyncio.TimeoutError:
             logger.error(f"❌ 추출 타임아웃: {url}")
             return None
         except Exception as e:
             logger.error(f"❌ 추출 실패: {e}")
             return None
-
+        
     async def lightning_search(self, query):
-        """초고속 검색 - 첫 번째 결과만 사용"""
         try:
-            # 스마트 검색어 생성
             if len(query.split()) <= 2:
                 search_query = f"{query} 가사"
             else:
                 search_query = query
-            
+
             params = {
                 "part": "snippet",
                 "q": search_query,
                 "type": "video",
                 "key": config.YOUTUBE_API_KEY,
-                "maxResults": 1,  # 첫 번째 결과만
+                "maxResults": 1,
                 "regionCode": "KR",
                 "videoCategoryId": "10"
             }
-            
-            async with self.session.get(
-                "https://www.googleapis.com/youtube/v3/search", 
-                params=params
-            ) as response:
+
+            async with self.session.get("https://www.googleapis.com/youtube/v3/search", params=params) as response:
                 if response.status == 200:
                     data = await response.json()
                     items = data.get("items", [])
-                    
                     if items:
                         video_url = f"https://www.youtube.com/watch?v={items[0]['id']['videoId']}"
                         logger.info(f"⚡ 빠른 검색 성공: {items[0]['snippet']['title'][:30]}")
                         return video_url
                 else:
-                    logger.error(f"❌ YouTube API 오류: {response.status}")
                     error_text = await response.text()
-                    logger.error(f"❌ API 응답: {error_text[:200]}")
-            
-            return None
-            
+                    logger.error(f"❌ YouTube API 오류 {response.status}: {error_text[:200]}")
         except Exception as e:
             logger.error(f"❌ 빠른 검색 실패: {e}")
-            return None
-
+        return None
+    
     async def _ensure_voice_connection(self, voice_channel):
         """음성 채널 연결"""
         try:
