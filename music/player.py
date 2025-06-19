@@ -14,7 +14,10 @@ from ui.controls import MusicView
 logger = logging.getLogger(__name__)
 
 FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "before_options": (
+        "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+        "-headers 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)'"
+    ),
     "options": "-vn -bufsize 512k"
 }
 
