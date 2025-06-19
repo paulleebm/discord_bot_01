@@ -32,32 +32,32 @@ FAST_YDL_OPTIONS = {
     'ignoreerrors': False,
     'extract_flat': False,
     'skip_download': True,
-    'cookiefile': 'cookies.txt',
-    
-    # 수동 테스트에서 성공한 것과 동일한 옵션들
+    'cookiefile': 'cookies.txt',  # 유튜브 인증 우회에 필수
+
+    # 안정적인 HTTP 요청
+    'socket_timeout': 20,
+    'retries': 2,
+    'geo_bypass': True,
+    'age_limit': None,
+
+    # User-Agent 지정
     'http_headers': {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate',
+        'Accept-Encoding': 'gzip, deflate, br',
         'DNT': '1',
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
     },
-    
-    # 추가 성공 옵션들
+
+    # 최신 유튜브 대응: 'web' 클라이언트 우선 사용
     'extractor_args': {
         'youtube': {
-            'skip': ['hls'],
-            'player_skip': ['configs'],
-            'player_client': ['tv', 'ios'],  # 다중 클라이언트 시도
+            'player_client': ['web'],  # 'tv', 'ios' 제거 (403 방지)
+            # 'player_skip': ['configs']  # configs 제거하면 더 안정적
         }
-    },
-    
-    'geo_bypass': True,
-    'age_limit': None,
-    'socket_timeout': 30,
-    'retries': 2,
+    }
 }
 
 # 캐시 파일 경로
