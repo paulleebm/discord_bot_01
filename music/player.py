@@ -448,6 +448,7 @@ class Player:
                     try:
                         source = discord.FFmpegPCMAudio(
                             track["stream_url"], 
+                            executable="/usr/bin/ffmpeg",
                             **FFMPEG_OPTIONS
                         )
                         
