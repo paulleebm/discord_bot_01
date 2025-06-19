@@ -5,6 +5,7 @@ from music.player import Player
 import signal
 import asyncio
 import logging
+from datetime import datetime  # datetime import 추가
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -21,6 +22,14 @@ player = Player(bot)
 @bot.event
 async def on_ready():
     await player.initialize()
+    
+    # 슬래시 커맨드 동기화를 여기서 실행
+    try:
+        synced = await bot.tree.sync()
+        logger.info(f"🔄 슬래시 커맨드 동기화 완료: {len(synced)}개")
+    except Exception as e:
+        logger.error(f"❌ 슬래시 커맨드 동기화 실패: {e}")
+    
     print(f"✅ Logged in as {bot.user}")
     print(f"📁 캐시 파일: music_cache.json")
 
@@ -115,11 +124,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 async def main():
     """메인 함수"""
     try:
-        # 슬래시 커맨드 동기화
-        await bot.tree.sync()
-        logger.info("🔄 슬래시 커맨드 동기화 완료")
-        
-        # 봇 실행
+        # 봇 실행 (슬래시 커맨드 동기화는 on_ready에서)
         await bot.start(config.BOT_TOKEN)
         
     except KeyboardInterrupt:
