@@ -59,7 +59,6 @@ FAST_YDL_OPTIONS = {
 
 # 캐시 파일 경로
 CACHE_FILE = "music_cache.json"
-# CACHE_EXPIRY_DAYS 제거 - 영구 보관
 
 class Player:
     def __init__(self, bot):
@@ -132,7 +131,7 @@ class Player:
             await self.vc.disconnect()
 
     async def handle_message(self, message):
-        """메시지 처리 - 초고속 버전"""
+        """메시지 처리 - 백그라운드 검색으로 재생 끊김 방지"""
         if message.author == self.bot.user or message.channel.id != config.CHANNEL_ID:
             return
 
@@ -140,10 +139,8 @@ class Player:
         try:
             await message.delete()
         except discord.errors.NotFound:
-            # 메시지가 이미 삭제됨
             pass
         except discord.errors.Forbidden:
-            # 삭제 권한 없음
             logger.warning("메시지 삭제 권한이 없습니다")
         except Exception as e:
             logger.warning(f"메시지 삭제 실패: {e}")
@@ -158,23 +155,33 @@ class Player:
         
         query = message.content.strip()
         
+        # 🚀 백그라운드에서 검색 처리 (재생 끊김 방지)
+        asyncio.create_task(self._background_search_and_add(query, message.author))
+
+    async def _background_search_and_add(self, query, author):
+        """백그라운드에서 검색 및 큐 추가 - 재생과 분리"""
         try:
-            # 1단계: 즉시 큐에 임시 추가 (0.1초)
+            # 1단계: 즉시 임시 트랙 추가 (UI 즉시 업데이트)
             temp_track = {
-                "title": f"🔍 검색 중: {query[:30]}...",
+                "title": f"🔍 {query[:25]}... 검색중",
                 "duration": 0,
-                "user": f"<@{message.author.id}>",
+                "user": f"<@{author.id}>",
                 "id": "",
                 "video_url": "",
                 "stream_url": None,
-                "loading": True  # 로딩 상태 표시
+                "loading": True
             }
             
             self.queue.append(temp_track)
-            await self.update_ui()
+            await self.update_ui()  # 즉시 UI 업데이트
             
-            # 2단계: 백그라운드에서 빠른 검색 및 정보 추출
-            video_url, track_info = await self.fast_search_and_extract(query)
+            # 2단계: 백그라운드에서 검색 (재생과 별도 스레드)
+            loop = asyncio.get_event_loop()
+            video_url, track_info = await loop.run_in_executor(
+                None, 
+                self._sync_search_and_extract, 
+                query
+            )
             
             if not video_url or not track_info:
                 # 실패시 임시 트랙 제거
@@ -182,19 +189,19 @@ class Player:
                     self.queue.remove(temp_track)
                 
                 try:
-                    error_msg = await message.channel.send(f"❌ '{query}' 를 찾을 수 없습니다.")
-                    await asyncio.sleep(3)
-                    await error_msg.delete()
+                    error_msg = await self.bot.get_channel(config.CHANNEL_ID).send(
+                        f"❌ '{query}' 를 찾을 수 없습니다.", delete_after=5
+                    )
                 except:
                     pass
                 await self.update_ui()
                 return
             
-            # 3단계: 실제 트랙 정보로 교체
+            # 3단계: 실제 트랙으로 교체
             real_track = {
                 "title": track_info["title"][:95],
                 "duration": int(track_info.get("duration", 0)),
-                "user": f"<@{message.author.id}>",
+                "user": f"<@{author.id}>",
                 "id": track_info.get("id", ""),
                 "video_url": video_url,
                 "stream_url": track_info.get("url"),
@@ -210,23 +217,39 @@ class Player:
             
             # UI 업데이트 및 음성 연결
             await self.update_ui()
-            await self._ensure_voice_connection(message.author.voice.channel)
+            await self._ensure_voice_connection(author.voice.channel)
             
-            logger.info(f"⚡ 빠른 추가 완료: {real_track['title']}")
+            logger.info(f"⚡ 백그라운드 추가 완료: {real_track['title']}")
             
         except Exception as e:
             # 오류시 임시 트랙 제거
             if temp_track in self.queue:
                 self.queue.remove(temp_track)
             
-            logger.error(f"❌ 처리 오류: {e}")
+            logger.error(f"❌ 백그라운드 처리 오류: {e}")
             try:
-                error_msg = await message.channel.send(f"❌ 오류 발생, 다시 시도해주세요")
-                await asyncio.sleep(3)
-                await error_msg.delete()
+                error_msg = await self.bot.get_channel(config.CHANNEL_ID).send(
+                    f"❌ 검색 오류가 발생했습니다", delete_after=3
+                )
             except:
                 pass
             await self.update_ui()
+
+    def _sync_search_and_extract(self, query):
+        """동기식 검색 및 추출 (별도 스레드용)"""
+        try:
+            # asyncio 이벤트 루프 생성
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                return loop.run_until_complete(self.fast_search_and_extract(query))
+            finally:
+                loop.close()
+                
+        except Exception as e:
+            logger.error(f"❌ 동기식 검색 실패: {e}")
+            return None, None
 
     async def fast_search_and_extract(self, query):
         """초고속 검색 및 정보 추출 - URL 기반 캐시"""
@@ -298,48 +321,6 @@ class Player:
             import hashlib
             return f"url_{hashlib.md5(video_url.encode()).hexdigest()[:11]}"
 
-    async def lightning_search(self, query):
-        """초고속 검색 - 첫 번째 결과만 사용"""
-        try:
-            # 스마트 검색어 생성
-            if len(query.split()) <= 2:
-                search_query = f"{query} 가사"
-            else:
-                search_query = query
-            
-            params = {
-                "part": "snippet",
-                "q": search_query,
-                "type": "video",
-                "key": config.YOUTUBE_API_KEY,
-                "maxResults": 1,  # 첫 번째 결과만
-                "regionCode": "KR",
-                "videoCategoryId": "10"
-            }
-            
-            async with self.session.get(
-                "https://www.googleapis.com/youtube/v3/search", 
-                params=params
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    items = data.get("items", [])
-                    
-                    if items:
-                        video_url = f"https://www.youtube.com/watch?v={items[0]['id']['videoId']}"
-                        logger.info(f"⚡ 빠른 검색 성공: {items[0]['snippet']['title'][:30]}")
-                        return video_url
-                else:
-                    logger.error(f"❌ YouTube API 오류: {response.status}")
-                    error_text = await response.text()
-                    logger.error(f"❌ API 응답: {error_text[:200]}")
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ 빠른 검색 실패: {e}")
-            return None
-  
     async def lightning_extract(self, url):
         """초고속 정보 추출 - 성공한 옵션 사용"""
         loop = asyncio.get_event_loop()
@@ -385,7 +366,49 @@ class Player:
         except Exception as e:
             logger.error(f"❌ 추출 실패: {e}")
             return None
-        
+
+    async def lightning_search(self, query):
+        """초고속 검색 - 첫 번째 결과만 사용"""
+        try:
+            # 스마트 검색어 생성
+            if len(query.split()) <= 2:
+                search_query = f"{query} 가사"
+            else:
+                search_query = query
+            
+            params = {
+                "part": "snippet",
+                "q": search_query,
+                "type": "video",
+                "key": config.YOUTUBE_API_KEY,
+                "maxResults": 1,  # 첫 번째 결과만
+                "regionCode": "KR",
+                "videoCategoryId": "10"
+            }
+            
+            async with self.session.get(
+                "https://www.googleapis.com/youtube/v3/search", 
+                params=params
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    items = data.get("items", [])
+                    
+                    if items:
+                        video_url = f"https://www.youtube.com/watch?v={items[0]['id']['videoId']}"
+                        logger.info(f"⚡ 빠른 검색 성공: {items[0]['snippet']['title'][:30]}")
+                        return video_url
+                else:
+                    logger.error(f"❌ YouTube API 오류: {response.status}")
+                    error_text = await response.text()
+                    logger.error(f"❌ API 응답: {error_text[:200]}")
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ 빠른 검색 실패: {e}")
+            return None
+
     async def _ensure_voice_connection(self, voice_channel):
         """음성 채널 연결"""
         try:
@@ -446,17 +469,21 @@ class Player:
         except Exception as e:
             logger.error(f"❌ UI 업데이트 실패: {e}")
 
-    @tasks.loop(seconds=1)
+    @tasks.loop(seconds=0.5)  # 0.5초로 단축 (더 빠른 반응)
     async def auto_play(self):
-        """자동 재생 루프 - 최적화"""
+        """자동 재생 루프 - 검색 버벅임 방지"""
         try:
             if self.vc and not self.vc.is_playing():
                 if self.queue:
-                    track = self.queue.pop(0)
+                    # 로딩 중인 트랙은 건너뛰기
+                    while self.queue and self.queue[0].get("loading"):
+                        await asyncio.sleep(0.1)  # 짧은 대기
+                        continue
                     
-                    # 로딩 중인 트랙이면 스킵
-                    if track.get("loading"):
+                    if not self.queue:  # 큐가 비었으면 종료
                         return
+                    
+                    track = self.queue.pop(0)
                     
                     # 스트림 URL 확인
                     if not track.get("stream_url"):
@@ -468,7 +495,6 @@ class Player:
                     try:
                         source = discord.FFmpegPCMAudio(
                             track["stream_url"], 
-                            executable="/usr/bin/ffmpeg",
                             **FFMPEG_OPTIONS
                         )
                         
