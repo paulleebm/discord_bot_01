@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 FFMPEG_OPTIONS = {
     "before_options": (
         "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
-        "-headers 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)'"
+        "-headers \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\""
     ),
     "options": "-vn -bufsize 512k"
 }
@@ -286,11 +286,16 @@ class Player:
             
             if cache_key in self._cache:
                 cached_data = self._cache[cache_key]
-                # 재생 횟수 증가
-                cached_data['play_count'] = cached_data.get('play_count', 0) + 1
-                cached_data['last_played'] = datetime.now().isoformat()
-                logger.info(f"⚡ URL 캐시 사용 ({cached_data['play_count']}회째): {cached_data['track_info']['title'][:30]}")
-                return video_url, cached_data['track_info']
+                url = cached_data['track_info'].get('url', '')
+                if 'c=TVHTML5' in url or 'googlevideo.com' in url and 'signature' not in url:
+                    logger.warning(f"⚠️ 무효한 캐시 URL 감지, 재추출 시도: {url}")
+                    del self._cache[cache_key]  # 무효화
+                else:
+                    cached_data['play_count'] = cached_data.get('play_count', 0) + 1
+                    cached_data['last_played'] = datetime.now().isoformat()
+                    logger.info(f"⚡ URL 캐시 사용 ({cached_data['play_count']}회째): {cached_data['track_info']['title'][:30]}")
+                    return video_url, cached_data['track_info']
+
             
             # 3단계: 캐시에 없으면 정보 추출 (느림)
             logger.info(f"🔄 새로운 URL 정보 추출: {video_url}")
@@ -345,21 +350,8 @@ class Player:
         loop = asyncio.get_event_loop()
         
         try:
-            # 성공한 수동 테스트와 동일한 옵션 사용
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'quiet': True,
-                'no_warnings': True,
-                'extractaudio': True,
-                'noplaylist': True,
-                'nocheckcertificate': True,
-                'ignoreerrors': False,
-                'extract_flat': False,
-                'skip_download': True,
-                'cookiefile': 'cookies.txt',  # 동일한 쿠키 파일
-            }
             
-            with YoutubeDL(ydl_opts) as ydl:
+            with YoutubeDL(FAST_YDL_OPTIONS) as ydl:
                 # 타임아웃을 15초로 늘림
                 info = await asyncio.wait_for(
                     loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False)),
@@ -545,7 +537,10 @@ class Player:
                         await self.stop()
                     
         except Exception as e:
-            logger.error(f"❌ auto_play 오류: {e}")
+            logger.error(f"❌ 재생 실패: {e}")
+            logger.error(f"🔍 스트림 URL: {track['stream_url']}")
+            await self.update_ui()
+            return
 
     async def stop(self):
         """재생 중지"""
