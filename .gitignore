@@ -1,1 +1,8 @@
 config.py
+cookies.txt
+music_cache.json
+*.key
+*.pem
+__pycache__/
+*.pyc
+.env
