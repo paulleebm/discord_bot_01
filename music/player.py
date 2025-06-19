@@ -341,27 +341,33 @@ class Player:
             return None
   
     async def lightning_extract(self, url):
-        """초고속 정보 추출 - 타임아웃 단축"""
+        """초고속 정보 추출 - 성공한 옵션 사용"""
         loop = asyncio.get_event_loop()
         
         try:
-            ydl_opts = FAST_YDL_OPTIONS.copy()
-            
-            # 쿠키 파일이 있으면 사용
-            try:
-                with open(config.COOKIES_FILE, 'r'):
-                    ydl_opts['cookiefile'] = config.COOKIES_FILE
-            except FileNotFoundError:
-                pass
+            # 성공한 수동 테스트와 동일한 옵션 사용
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'quiet': True,
+                'no_warnings': True,
+                'extractaudio': True,
+                'noplaylist': True,
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+                'extract_flat': False,
+                'skip_download': True,
+                'cookiefile': 'cookies.txt',  # 동일한 쿠키 파일
+            }
             
             with YoutubeDL(ydl_opts) as ydl:
-                # 타임아웃을 5초로 단축
+                # 타임아웃을 15초로 늘림
                 info = await asyncio.wait_for(
                     loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False)),
-                    timeout=5.0
+                    timeout=15.0
                 )
                 
                 if not info or not info.get('url'):
+                    logger.error(f"❌ 스트림 URL 없음: {url}")
                     return None
                 
                 logger.info(f"⚡ 빠른 추출 성공: {info.get('title', 'Unknown')[:30]}")
@@ -379,7 +385,7 @@ class Player:
         except Exception as e:
             logger.error(f"❌ 추출 실패: {e}")
             return None
-
+        
     async def _ensure_voice_connection(self, voice_channel):
         """음성 채널 연결"""
         try:
