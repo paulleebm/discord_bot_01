@@ -1,3 +1,5 @@
+# music/player.py - 멀티 서버 지원 버전
+
 import discord
 import config
 import asyncio
@@ -31,14 +33,10 @@ FAST_YDL_OPTIONS = {
     'extract_flat': False,
     'skip_download': True,
     'cookiefile': 'cookies.txt',
-
-    # 안정적인 HTTP 요청
     'socket_timeout': 20,
     'retries': 2,
     'geo_bypass': True,
     'age_limit': None,
-
-    # User-Agent 지정
     'http_headers': {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -48,8 +46,6 @@ FAST_YDL_OPTIONS = {
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
     },
-
-    # 최신 유튜브 대응
     'extractor_args': {
         'youtube': {
             'player_client': ['web'],
@@ -57,54 +53,69 @@ FAST_YDL_OPTIONS = {
     }
 }
 
-class Player:
-    def __init__(self, bot):
+class GuildPlayer:
+    """서버별 플레이어 인스턴스"""
+    def __init__(self, guild_id, bot):
+        self.guild_id = guild_id
         self.bot = bot
         self.vc = None
         self.queue = []
         self.current = []
         self.channel = None
         self.message = None
-        self.session = None
         
-        # 백그라운드 처리용 스레드 풀 (재생과 완전 분리)
-        self.search_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="search")
-        self._processing_lock = asyncio.Lock()  # UI 업데이트 동기화
-
+        # 백그라운드 처리용 스레드 풀
+        self.search_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix=f"search-{guild_id}")
+        self._processing_lock = asyncio.Lock()
+    
     async def initialize(self):
         """플레이어 초기화"""
         try:
-            self.channel = self.bot.get_channel(config.CHANNEL_ID)
-            self.message = await self.channel.fetch_message(config.MSG_ID)
+            channel_id = config.guild_settings.get_music_channel(self.guild_id)
+            message_id = config.guild_settings.get_music_message(self.guild_id)
             
-            # 메인 세션 생성 (재생용)
-            self.session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=8),
-                connector=aiohttp.TCPConnector(limit=10, limit_per_host=5)
-            )
+            if not channel_id or not message_id:
+                logger.warning(f"⚠️ 서버 {self.guild_id}: 음악 채널 또는 메시지 설정이 없음")
+                return False
             
-            self.auto_play.start()
-            logging.basicConfig(level=logging.INFO)
-            logger.info("✅ Player 초기화 완료 (캐시 없음)")
+            self.channel = self.bot.get_channel(channel_id)
+            if not self.channel:
+                logger.error(f"❌ 서버 {self.guild_id}: 채널 {channel_id}를 찾을 수 없음")
+                return False
+            
+            try:
+                self.message = await self.channel.fetch_message(message_id)
+            except discord.NotFound:
+                logger.error(f"❌ 서버 {self.guild_id}: 메시지 {message_id}를 찾을 수 없음")
+                return False
+            
+            logger.info(f"✅ 서버 {self.guild_id} 플레이어 초기화 완료")
+            return True
+            
         except Exception as e:
-            logger.error(f"❌ Player 초기화 실패: {e}")
-            raise
-
+            logger.error(f"❌ 서버 {self.guild_id} 플레이어 초기화 실패: {e}")
+            return False
+    
     async def cleanup(self):
         """리소스 정리"""
-        if self.session:
-            await self.session.close()
         if self.vc:
-            await self.vc.disconnect()
+            try:
+                await self.vc.disconnect()
+            except:
+                pass
         
         # 스레드 풀 종료
         self.search_executor.shutdown(wait=False)
-
+    
     async def handle_message(self, message):
         """메시지 처리 - 완전 비동기 처리로 재생 끊김 방지"""
-        if message.author == self.bot.user or message.channel.id != config.CHANNEL_ID:
+        if message.author == self.bot.user:
             return
-
+        
+        # 설정된 음악 채널인지 확인
+        if message.channel.id != config.guild_settings.get_music_channel(self.guild_id):
+            return
+        
         # 안전한 메시지 삭제
         try:
             await message.delete()
@@ -123,7 +134,7 @@ class Player:
         
         query = message.content.strip()
         
-        # 🚀 완전히 독립적인 백그라운드 처리 (재생과 100% 분리)
+        # 완전히 독립적인 백그라운드 처리
         asyncio.create_task(self._fully_async_search_and_add(query, message.author))
 
     async def _fully_async_search_and_add(self, query, author):
@@ -274,14 +285,6 @@ class Player:
         except Exception as e:
             logger.error(f"❌ 검색 오류: {e}")
         return None
-    
-    def _simple_clean_query(self, query):
-        """사용 안함 - 제거됨"""
-        return query
-    
-    def _quick_select_video(self, items, query, is_collection):
-        """사용 안함 - 제거됨"""
-        return items[0] if items else None
 
     async def _isolated_extract(self, url):
         """격리된 정보 추출 - 항상 새로운 스트림 URL 생성"""
@@ -320,7 +323,7 @@ class Player:
     async def _send_error_message(self, message):
         """에러 메시지 전송 (별도 태스크)"""
         try:
-            await self.bot.get_channel(config.CHANNEL_ID).send(message, delete_after=5)
+            await self.channel.send(message, delete_after=5)
         except:
             pass
 
@@ -384,64 +387,6 @@ class Player:
         except Exception as e:
             logger.error(f"❌ UI 업데이트 실패: {e}")
 
-    @tasks.loop(seconds=1.0)  # 1초로 조정 (안정성 향상)
-    async def auto_play(self):
-        """자동 재생 루프 - 검색과 완전 분리"""
-        try:
-            if self.vc and not self.vc.is_playing():
-                if self.queue:
-                    # 로딩 중인 트랙 건너뛰기 (논블로킹)
-                    ready_tracks = [t for t in self.queue if not t.get("loading")]
-                    if not ready_tracks:
-                        return  # 준비된 트랙이 없으면 대기
-                    
-                    # 첫 번째 준비된 트랙 재생
-                    track = ready_tracks[0]
-                    self.queue.remove(track)
-                    
-                    # 스트림 URL 확인
-                    if not track.get("stream_url"):
-                        logger.error(f"❌ 스트림 URL 없음: {track['title']}")
-                        await self.update_ui()
-                        return
-                    
-                    # 재생 시작
-                    try:
-                        source = discord.FFmpegPCMAudio(
-                            track["stream_url"],
-                            **FFMPEG_OPTIONS
-                        )
-                        
-                        self.current = [track]
-                        self.vc.play(source)
-                        await self.update_ui()
-                        
-                        logger.info(f"▶️ 재생 시작: {track['title'][:30]}")
-                        
-                    except Exception as e:
-                        logger.error(f"❌ 재생 실패: {e}")
-                        await self.update_ui()
-                        return
-                        
-                elif self.current:
-                    self.current = []
-                    await self.update_ui()
-                    logger.info("⏹️ 재생 완료")
-                
-                # 자동 종료 (5분)
-                if (self.vc and self.vc.channel and 
-                    len(self.vc.channel.members) == 1 and 
-                    not self.queue and not self.current):
-                    
-                    await asyncio.sleep(300)
-                    if (self.vc and self.vc.channel and 
-                        len(self.vc.channel.members) == 1):
-                        await self.stop()
-                    
-        except Exception as e:
-            logger.error(f"❌ 재생 루프 오류: {e}")
-            await self.update_ui()
-
     async def stop(self):
         """재생 중지"""
         try:
@@ -455,7 +400,7 @@ class Player:
                 self.vc = None
                 
             await self.update_ui()
-            logger.info("🛑 플레이어 중지")
+            logger.info(f"🛑 서버 {self.guild_id} 플레이어 중지")
             
         except Exception as e:
             logger.error(f"❌ 중지 오류: {e}")
@@ -464,7 +409,7 @@ class Player:
         """건너뛰기"""
         if self.vc and self.vc.is_playing():
             self.vc.stop()
-            logger.info("⏭️ 곡 건너뛰기")
+            logger.info(f"⏭️ 서버 {self.guild_id} 곡 건너뛰기")
             return True
         return False
 
@@ -477,24 +422,151 @@ class Player:
             'is_playing': self.vc.is_playing() if self.vc else False
         }
 
-    # 캐시 관련 함수들은 호환성을 위해 유지 (아무것도 하지 않음)
-    def clear_cache(self):
-        """캐시 정리 (캐시 없음)"""
-        logger.info("🗑️ 캐시 기능 비활성화됨")
-
-    async def get_cache_stats(self):
-        """캐시 통계 (캐시 없음)"""
-        return {
-            'total_items': 0,
-            'file_size_kb': 0,
-            'file_exists': False,
-            'total_plays': 0,
-            'oldest_cache': None,
-            'cache_disabled': True
-        }
-
+class Player:
+    """멀티 서버 플레이어 매니저"""
+    def __init__(self, bot):
+        self.bot = bot
+        self.session = None
+        self.guild_players = {}  # 서버별 플레이어 딕셔너리
+        
+    async def initialize(self):
+        """플레이어 초기화"""
+        try:
+            # 메인 세션 생성
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=8),
+                connector=aiohttp.TCPConnector(limit=10, limit_per_host=5)
+            )
+            
+            # 모든 서버의 플레이어 초기화
+            for guild in self.bot.guilds:
+                if config.guild_settings.is_music_enabled(guild.id):
+                    await self.get_or_create_player(guild.id)
+            
+            self.auto_play.start()
+            logger.info("✅ 멀티 서버 플레이어 초기화 완료")
+            
+        except Exception as e:
+            logger.error(f"❌ 플레이어 초기화 실패: {e}")
+            raise
+    
+    async def get_or_create_player(self, guild_id):
+        """서버별 플레이어 가져오기 또는 생성"""
+        if guild_id not in self.guild_players:
+            player = GuildPlayer(guild_id, self.bot)
+            if await player.initialize():
+                self.guild_players[guild_id] = player
+                logger.info(f"🎵 서버 {guild_id} 플레이어 생성됨")
+            else:
+                logger.warning(f"⚠️ 서버 {guild_id} 플레이어 초기화 실패")
+                return None
+        
+        return self.guild_players.get(guild_id)
+    
+    async def handle_message(self, message):
+        """메시지 처리 - 해당 서버의 플레이어에게 전달"""
+        if not message.guild:
+            return
+        
+        player = await self.get_or_create_player(message.guild.id)
+        if player:
+            await player.handle_message(message)
+    
+    @tasks.loop(seconds=1.0)
+    async def auto_play(self):
+        """모든 서버의 자동 재생 처리"""
+        for guild_id, player in list(self.guild_players.items()):
+            try:
+                if player.vc and not player.vc.is_playing():
+                    # 재생 로직은 GuildPlayer의 auto_play와 동일
+                    if player.queue:
+                        ready_tracks = [t for t in player.queue if not t.get("loading")]
+                        if not ready_tracks:
+                            continue
+                        
+                        track = ready_tracks[0]
+                        player.queue.remove(track)
+                        
+                        if not track.get("stream_url"):
+                            await player.update_ui()
+                            continue
+                        
+                        try:
+                            source = discord.FFmpegPCMAudio(
+                                track["stream_url"],
+                                **FFMPEG_OPTIONS
+                            )
+                            
+                            player.current = [track]
+                            player.vc.play(source)
+                            await player.update_ui()
+                            
+                        except Exception as e:
+                            logger.error(f"❌ 서버 {guild_id} 재생 실패: {e}")
+                            await player.update_ui()
+                            
+                    elif player.current:
+                        player.current = []
+                        await player.update_ui()
+                    
+                    # 자동 종료 체크
+                    if (player.vc and player.vc.channel and 
+                        len(player.vc.channel.members) == 1 and 
+                        not player.queue and not player.current):
+                        
+                        await asyncio.sleep(300)
+                        if (player.vc and player.vc.channel and 
+                            len(player.vc.channel.members) == 1):
+                            await player.stop()
+                        
+            except Exception as e:
+                logger.error(f"❌ 서버 {guild_id} 재생 루프 오류: {e}")
+    
+    async def cleanup(self):
+        """모든 리소스 정리"""
+        if self.session:
+            await self.session.close()
+        
+        for player in self.guild_players.values():
+            await player.cleanup()
+        
+        self.guild_players.clear()
+    
+    def get_player(self, guild_id):
+        """특정 서버의 플레이어 가져오기"""
+        return self.guild_players.get(guild_id)
+    
+    async def setup_music_channel(self, guild_id, channel_id):
+        """음악 채널 설정"""
+        try:
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                return False, "채널을 찾을 수 없습니다."
+            
+            # 기본 메시지 생성
+            embed = discord.Embed(
+                title="🎵 음악 플레이어",
+                description="제목을 입력하여 음악을 재생하세요",
+                color=0x00ff00
+            )
+            
+            message = await channel.send(embed=embed)
+            
+            # 설정 저장
+            config.guild_settings.set_music_channel(guild_id, channel_id)
+            config.guild_settings.set_music_message(guild_id, message.id)
+            
+            # 플레이어 생성
+            await self.get_or_create_player(guild_id)
+            
+            return True, f"음악 플레이어가 {channel.mention}에 설정되었습니다."
+            
+        except Exception as e:
+            logger.error(f"❌ 음악 채널 설정 실패: {e}")
+            return False, "설정 중 오류가 발생했습니다."
+    
     async def shutdown_handler(self):
         """정상 종료 처리"""
-        logger.info("🔄 봇 종료 준비 중...")
+        logger.info("🔄 멀티 서버 플레이어 종료 준비 중...")
         await self.cleanup()
-        logger.info("🧹 리소스 정리 완료")
+        logger.info("🧹 모든 리소스 정리 완료")
