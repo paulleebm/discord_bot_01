@@ -29,9 +29,18 @@ FAST_YDL_OPTIONS = {
     'ignoreerrors': False,
     'extract_flat': False,
     'skip_download': True,
+    'cookiefile': 'cookies.txt',  # 이 부분이 중요!
     'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    },
+    'geo_bypass': True,
+    'age_limit': None,
 }
 
 # 캐시 파일 경로
@@ -113,12 +122,24 @@ class Player:
         if message.author == self.bot.user or message.channel.id != config.CHANNEL_ID:
             return
 
-        # 즉시 삭제
-        await message.delete()
+        # 안전한 메시지 삭제
+        try:
+            await message.delete()
+        except discord.errors.NotFound:
+            # 메시지가 이미 삭제됨
+            pass
+        except discord.errors.Forbidden:
+            # 삭제 권한 없음
+            logger.warning("메시지 삭제 권한이 없습니다")
+        except Exception as e:
+            logger.warning(f"메시지 삭제 실패: {e}")
         
         # 음성 채널 확인
         if not message.author.voice:
-            await message.channel.send("❌ 음성 채널에 먼저 접속해주세요!", delete_after=3)
+            try:
+                error_msg = await message.channel.send("❌ 음성 채널에 먼저 접속해주세요!", delete_after=3)
+            except:
+                pass
             return
         
         query = message.content.strip()
@@ -146,9 +167,12 @@ class Player:
                 if temp_track in self.queue:
                     self.queue.remove(temp_track)
                 
-                error_msg = await message.channel.send(f"❌ '{query}' 를 찾을 수 없습니다.")
-                await asyncio.sleep(3)
-                await error_msg.delete()
+                try:
+                    error_msg = await message.channel.send(f"❌ '{query}' 를 찾을 수 없습니다.")
+                    await asyncio.sleep(3)
+                    await error_msg.delete()
+                except:
+                    pass
                 await self.update_ui()
                 return
             
@@ -182,9 +206,12 @@ class Player:
                 self.queue.remove(temp_track)
             
             logger.error(f"❌ 처리 오류: {e}")
-            error_msg = await message.channel.send(f"❌ 오류 발생, 다시 시도해주세요")
-            await asyncio.sleep(3)
-            await error_msg.delete()
+            try:
+                error_msg = await message.channel.send(f"❌ 오류 발생, 다시 시도해주세요")
+                await asyncio.sleep(3)
+                await error_msg.delete()
+            except:
+                pass
             await self.update_ui()
 
     async def fast_search_and_extract(self, query):
@@ -257,6 +284,42 @@ class Player:
             import hashlib
             return f"url_{hashlib.md5(video_url.encode()).hexdigest()[:11]}"
 
+    async def lightning_extract(self, url):
+        """초고속 정보 추출 - 쿠키 강제 적용"""
+        loop = asyncio.get_event_loop()
+        
+        try:
+            ydl_opts = FAST_YDL_OPTIONS.copy()
+            
+            # 쿠키 파일 강제 적용
+            ydl_opts['cookiefile'] = 'cookies.txt'
+            
+            with YoutubeDL(ydl_opts) as ydl:
+                # 타임아웃을 10초로 늘림
+                info = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False)),
+                    timeout=10.0
+                )
+                
+                if not info or not info.get('url'):
+                    return None
+                
+                logger.info(f"⚡ 빠른 추출 성공: {info.get('title', 'Unknown')[:30]}")
+                return {
+                    'title': info.get('title', 'Unknown Title'),
+                    'duration': info.get('duration', 0),
+                    'id': info.get('id', ''),
+                    'uploader': info.get('uploader', 'Unknown'),
+                    'url': info.get('url'),
+                }
+                
+        except asyncio.TimeoutError:
+            logger.error(f"❌ 추출 타임아웃: {url}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ 추출 실패: {e}")
+            return None
+
     async def lightning_search(self, query):
         """초고속 검색 - 첫 번째 결과만 사용"""
         try:
@@ -288,6 +351,10 @@ class Player:
                         video_url = f"https://www.youtube.com/watch?v={items[0]['id']['videoId']}"
                         logger.info(f"⚡ 빠른 검색 성공: {items[0]['snippet']['title'][:30]}")
                         return video_url
+                else:
+                    logger.error(f"❌ YouTube API 오류: {response.status}")
+                    error_text = await response.text()
+                    logger.error(f"❌ API 응답: {error_text[:200]}")
             
             return None
             
@@ -295,6 +362,43 @@ class Player:
             logger.error(f"❌ 빠른 검색 실패: {e}")
             return None
 
+    async def lightning_extract(self, url):
+        """초고속 정보 추출 - 타임아웃 단축"""
+        loop = asyncio.get_event_loop()
+        
+        try:
+            ydl_opts = FAST_YDL_OPTIONS.copy()
+            
+            # 쿠키 파일 강제 적용
+            ydl_opts['cookiefile'] = 'cookies.txt'
+            
+            with YoutubeDL(ydl_opts) as ydl:
+                # 타임아웃을 10초로 설정
+                info = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False)),
+                    timeout=10.0
+                )
+                
+                if not info or not info.get('url'):
+                    logger.error(f"❌ 스트림 URL 없음: {url}")
+                    return None
+                
+                logger.info(f"⚡ 빠른 추출 성공: {info.get('title', 'Unknown')[:30]}")
+                return {
+                    'title': info.get('title', 'Unknown Title'),
+                    'duration': info.get('duration', 0),
+                    'id': info.get('id', ''),
+                    'uploader': info.get('uploader', 'Unknown'),
+                    'url': info.get('url'),
+                }
+                
+        except asyncio.TimeoutError:
+            logger.error(f"❌ 추출 타임아웃: {url}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ 추출 실패: {e}")
+            return None
+    
     async def lightning_extract(self, url):
         """초고속 정보 추출 - 타임아웃 단축"""
         loop = asyncio.get_event_loop()
