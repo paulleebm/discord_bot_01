@@ -284,42 +284,6 @@ class Player:
             import hashlib
             return f"url_{hashlib.md5(video_url.encode()).hexdigest()[:11]}"
 
-    async def lightning_extract(self, url):
-        """초고속 정보 추출 - 쿠키 강제 적용"""
-        loop = asyncio.get_event_loop()
-        
-        try:
-            ydl_opts = FAST_YDL_OPTIONS.copy()
-            
-            # 쿠키 파일 강제 적용
-            ydl_opts['cookiefile'] = 'cookies.txt'
-            
-            with YoutubeDL(ydl_opts) as ydl:
-                # 타임아웃을 10초로 늘림
-                info = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False)),
-                    timeout=10.0
-                )
-                
-                if not info or not info.get('url'):
-                    return None
-                
-                logger.info(f"⚡ 빠른 추출 성공: {info.get('title', 'Unknown')[:30]}")
-                return {
-                    'title': info.get('title', 'Unknown Title'),
-                    'duration': info.get('duration', 0),
-                    'id': info.get('id', ''),
-                    'uploader': info.get('uploader', 'Unknown'),
-                    'url': info.get('url'),
-                }
-                
-        except asyncio.TimeoutError:
-            logger.error(f"❌ 추출 타임아웃: {url}")
-            return None
-        except Exception as e:
-            logger.error(f"❌ 추출 실패: {e}")
-            return None
-
     async def lightning_search(self, query):
         """초고속 검색 - 첫 번째 결과만 사용"""
         try:
@@ -361,44 +325,7 @@ class Player:
         except Exception as e:
             logger.error(f"❌ 빠른 검색 실패: {e}")
             return None
-
-    async def lightning_extract(self, url):
-        """초고속 정보 추출 - 타임아웃 단축"""
-        loop = asyncio.get_event_loop()
-        
-        try:
-            ydl_opts = FAST_YDL_OPTIONS.copy()
-            
-            # 쿠키 파일 강제 적용
-            ydl_opts['cookiefile'] = 'cookies.txt'
-            
-            with YoutubeDL(ydl_opts) as ydl:
-                # 타임아웃을 10초로 설정
-                info = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False)),
-                    timeout=10.0
-                )
-                
-                if not info or not info.get('url'):
-                    logger.error(f"❌ 스트림 URL 없음: {url}")
-                    return None
-                
-                logger.info(f"⚡ 빠른 추출 성공: {info.get('title', 'Unknown')[:30]}")
-                return {
-                    'title': info.get('title', 'Unknown Title'),
-                    'duration': info.get('duration', 0),
-                    'id': info.get('id', ''),
-                    'uploader': info.get('uploader', 'Unknown'),
-                    'url': info.get('url'),
-                }
-                
-        except asyncio.TimeoutError:
-            logger.error(f"❌ 추출 타임아웃: {url}")
-            return None
-        except Exception as e:
-            logger.error(f"❌ 추출 실패: {e}")
-            return None
-    
+  
     async def lightning_extract(self, url):
         """초고속 정보 추출 - 타임아웃 단축"""
         loop = asyncio.get_event_loop()

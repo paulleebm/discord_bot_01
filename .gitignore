@@ -6,3 +6,4 @@ music_cache.json
 __pycache__/
 *.pyc
 .env
+*.pyc
