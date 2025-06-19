@@ -5,7 +5,7 @@ from music.player import Player
 import signal
 import asyncio
 import logging
-from datetime import datetime  # datetime import 추가
+from datetime import datetime
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -31,74 +31,94 @@ async def on_ready():
         logger.error(f"❌ 슬래시 커맨드 동기화 실패: {e}")
     
     print(f"✅ Logged in as {bot.user}")
-    print(f"📁 캐시 파일: music_cache.json")
 
 @bot.event
 async def on_message(message):
     await player.handle_message(message)
 
-# 캐시 관련 슬래시 커맨드 추가
-@bot.tree.command(name="cache_stats", description="캐시 통계 확인")
-async def cache_stats(interaction: discord.Interaction):
-    """캐시 통계 확인"""
-    if interaction.user.guild_permissions.manage_guild:
-        stats = await player.get_cache_stats()
-        embed = discord.Embed(title="📊 캐시 통계 (영구 보관)", color=0x00ff00)
-        embed.add_field(name="🗂️ 저장된 곡", value=f"{stats['total_items']}개", inline=True)
-        embed.add_field(name="📁 파일 크기", value=f"{stats['file_size_kb']}KB", inline=True)
-        embed.add_field(name="🎵 총 재생 횟수", value=f"{stats['total_plays']}회", inline=True)
-        
-        if stats['oldest_cache']:
-            try:
-                oldest_date = datetime.fromisoformat(stats['oldest_cache']).strftime("%Y-%m-%d")
-                embed.add_field(name="📅 가장 오래된 캐시", value=oldest_date, inline=True)
-            except:
-                pass
-        
-        embed.add_field(name="💾 파일 존재", value="✅" if stats['file_exists'] else "❌", inline=True)
-        embed.add_field(name="♾️ 보관 정책", value="영구 보관", inline=True)
-        
-        if stats['total_items'] > 0:
-            avg_plays = round(stats['total_plays'] / stats['total_items'], 1)
-            embed.add_field(name="📈 평균 재생", value=f"{avg_plays}회/곡", inline=True)
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+# 간단한 상태 확인 슬래시 커맨드
+@bot.tree.command(name="status", description="플레이어 상태 확인")
+async def status(interaction: discord.Interaction):
+    """플레이어 상태 확인"""
+    info = player.get_queue_info()
+    
+    embed = discord.Embed(title="🎵 플레이어 상태", color=0x00ff00)
+    embed.add_field(name="🎵 현재 재생", 
+                   value=info['current']['title'][:50] if info['current'] else "없음", 
+                   inline=False)
+    embed.add_field(name="📋 대기열", value=f"{info['queue_length']}개", inline=True)
+    embed.add_field(name="⏱️ 총 대기시간", 
+                   value=f"{info['total_duration']//60}분 {info['total_duration']%60}초", 
+                   inline=True)
+    embed.add_field(name="🔊 재생 상태", 
+                   value="▶️ 재생중" if info['is_playing'] else "⏸️ 정지", 
+                   inline=True)
+    embed.add_field(name="💾 캐시", value="🚫 비활성화", inline=True)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="queue", description="현재 대기열 확인")
+async def queue_command(interaction: discord.Interaction):
+    """대기열 확인"""
+    if not player.queue:
+        await interaction.response.send_message("📭 대기열이 비어있습니다.", ephemeral=True)
+        return
+    
+    embed = discord.Embed(title="📋 현재 대기열", color=0x1DB954)
+    
+    queue_text = ""
+    for i, track in enumerate(player.queue[:10]):  # 최대 10개만 표시
+        if track.get("loading"):
+            queue_text += f"{i+1}. 🔍 {track['title']}\n"
+        else:
+            duration = f"{track['duration']//60}:{track['duration']%60:02d}"
+            queue_text += f"{i+1}. {track['title'][:40]} ({duration})\n"
+    
+    if len(player.queue) > 10:
+        queue_text += f"\n... 외 {len(player.queue)-10}개"
+    
+    embed.description = queue_text if queue_text else "대기열이 비어있습니다."
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="skip", description="현재 곡 건너뛰기")
+async def skip_command(interaction: discord.Interaction):
+    """곡 건너뛰기"""
+    if interaction.user.guild_permissions.manage_messages:
+        if await player.skip():
+            await interaction.response.send_message("⏭️ 다음 곡으로 넘어갑니다.", ephemeral=True)
+        else:
+            await interaction.response.send_message("⏸️ 현재 재생 중인 곡이 없습니다.", ephemeral=True)
     else:
         await interaction.response.send_message("❌ 권한이 없습니다.", ephemeral=True)
 
-@bot.tree.command(name="clear_cache", description="캐시 파일 완전 삭제 (주의!)")
-async def clear_cache_command(interaction: discord.Interaction):
-    """캐시 삭제 - 영구 보관이므로 신중하게"""
-    if interaction.user.guild_permissions.manage_guild:
-        stats = await player.get_cache_stats()
-        
-        # 확인 메시지
-        embed = discord.Embed(
-            title="⚠️ 캐시 삭제 확인", 
-            description=f"정말로 **{stats['total_items']}개의 캐시**를 모두 삭제하시겠습니까?\n"
-                       f"총 **{stats['total_plays']}회**의 재생 기록이 사라집니다.\n\n"
-                       f"**이 작업은 되돌릴 수 없습니다!**",
-            color=0xff6b6b
-        )
-        
-        await interaction.response.send_message(
-            embed=embed, 
-            ephemeral=True
-        )
-        
-        # 실제 삭제는 별도 확인 없이는 하지 않음
-        # 필요시 /clear_cache_confirm 명령어 추가 가능
+@bot.tree.command(name="stop", description="플레이어 중지")
+async def stop_command(interaction: discord.Interaction):
+    """플레이어 중지"""
+    if interaction.user.guild_permissions.manage_messages:
+        await player.stop()
+        await interaction.response.send_message("🛑 플레이어를 중지했습니다.", ephemeral=True)
     else:
         await interaction.response.send_message("❌ 권한이 없습니다.", ephemeral=True)
 
-@bot.tree.command(name="clear_cache_confirm", description="캐시 파일 강제 삭제 (관리자만)")
-async def clear_cache_confirm(interaction: discord.Interaction):
-    """실제 캐시 삭제"""
-    if interaction.user.guild_permissions.administrator:
-        player.clear_cache()
-        await interaction.response.send_message("🧹 모든 캐시가 삭제되었습니다.", ephemeral=True)
-    else:
-        await interaction.response.send_message("❌ 관리자 권한이 필요합니다.", ephemeral=True)
+# 캐시 관련 명령어들 (비활성화 알림)
+@bot.tree.command(name="cache_info", description="캐시 정보 (비활성화됨)")
+async def cache_info(interaction: discord.Interaction):
+    """캐시 정보"""
+    embed = discord.Embed(
+        title="💾 캐시 정보", 
+        description="캐시 기능이 비활성화되었습니다.\n\n"
+                   "**이유:** YouTube 스트림 URL이 시간이 지나면 만료되어\n"
+                   "캐시된 URL이 무효해지는 문제가 발생했습니다.\n\n"
+                   "**현재 방식:** 매번 새로운 스트림 URL을 생성하여\n"
+                   "안정적인 재생을 보장합니다.",
+        color=0xff9500
+    )
+    embed.add_field(name="🔄 처리 방식", value="실시간 URL 생성", inline=True)
+    embed.add_field(name="⚡ 성능", value="검색 속도 최적화", inline=True)
+    embed.add_field(name="🛡️ 안정성", value="URL 만료 없음", inline=True)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # 종료 시 리소스 정리
 async def cleanup():
@@ -141,3 +161,4 @@ if __name__ == "__main__":
         print("👋 봇 종료")
     except Exception as e:
         logger.error(f"❌ 메인 실행 오류: {e}")
+        logger.error(f"❌ 슬래시 커맨드 동기화 실패: {e}")
