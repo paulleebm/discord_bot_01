@@ -1,9 +1,14 @@
-# ui/controls.py - 멀티 서버 지원 버전
+# ui/controls.py - 최종 버전 (효율적인 믹스 버튼 포함)
 
 import discord
 from discord.ui import View, Button, Select
 from discord import SelectOption
 from datetime import timedelta
+import asyncio
+import logging
+import time
+
+logger = logging.getLogger(__name__)
 
 class MusicDropdown(Select):
     def __init__(self, guild_player):
@@ -73,30 +78,112 @@ class MusicView(View):
     def __init__(self, guild_player):
         super().__init__(timeout=None)
         self.guild_player = guild_player
+        self._last_interaction = {}
+        self._processing_users = set()  # 처리 중인 사용자 추적
         
         # 대기열이 있을 때만 드롭다운 추가
         if guild_player.queue:
             self.add_item(MusicDropdown(guild_player))
 
-    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.blurple)
-    async def skip_button(self, interaction: discord.Interaction, button: Button):
-        # 권한 확인
-        if not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("❌ 권한이 없습니다.", ephemeral=True)
-            return
+    async def _check_interaction_cooldown(self, interaction: discord.Interaction, cooldown_seconds: float = 3.0) -> bool:
+        """상호작용 쿨다운 체크 - 재생 중일 때 더 강화"""
+        user_id = interaction.user.id
+        current_time = time.time()
         
+        # 이미 처리 중인 사용자 체크
+        if user_id in self._processing_users:
+            await interaction.response.send_message(
+                "⚠️ 이미 요청을 처리 중입니다. 잠시만 기다려주세요.",
+                ephemeral=True
+            )
+            return False
+        
+        # 재생 중일 때는 쿨다운 증가
         if self.guild_player.vc and self.guild_player.vc.is_playing():
-            self.guild_player.vc.stop()
-            await interaction.response.send_message("⏭️ 다음 곡으로 이동합니다.", ephemeral=True)
-        else:
-            await interaction.response.send_message("⏸️ 현재 재생 중인 곡이 없습니다.", ephemeral=True)
-
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.red)
-    async def stop_button(self, interaction: discord.Interaction, button: Button):
-        # 권한 확인
-        if not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("❌ 권한이 없습니다.", ephemeral=True)
-            return
+            cooldown_seconds *= 1.5
         
-        await self.guild_player.stop()
-        await interaction.response.send_message("🛑 재생을 중지하고 연결을 종료했습니다.", ephemeral=True)
+        if user_id in self._last_interaction:
+            time_diff = current_time - self._last_interaction[user_id]
+            if time_diff < cooldown_seconds:
+                remaining = cooldown_seconds - time_diff
+                await interaction.response.send_message(
+                    f"⏳ 너무 빠른 요청입니다. {remaining:.1f}초 후에 다시 시도해주세요.",
+                    ephemeral=True
+                )
+                return False
+        
+        self._last_interaction[user_id] = current_time
+        self._processing_users.add(user_id)  # 처리 시작
+        return True
+
+    async def _handle_mix_button(self, interaction: discord.Interaction, count: int):
+        """믹스 버튼 처리 로직 - 재생 방해 최소화"""
+        user_id = interaction.user.id
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            # 현재 재생 중인 곡 확인
+            if not self.guild_player.current:
+                await interaction.followup.send(
+                    f"❌ 현재 재생 중인 곡이 없습니다.\n곡을 먼저 재생한 후 믹스 기능을 사용하세요.", 
+                    ephemeral=True
+                )
+                return
+            
+            current_track = self.guild_player.current[0]
+            current_url = current_track.get('video_url', '')
+            
+            if not current_url:
+                await interaction.followup.send("❌ 현재 곡의 URL을 찾을 수 없습니다.", ephemeral=True)
+                return
+            
+            if not hasattr(self.guild_player, 'youtube_mix_queue'):
+                await interaction.followup.send("❌ 믹스 기능이 초기화되지 않았습니다.", ephemeral=True)
+                return
+                
+            video_id = self.guild_player.youtube_mix_queue.extract_video_id(current_url)
+            if not video_id:
+                await interaction.followup.send("❌ 현재 곡의 비디오 ID를 추출할 수 없습니다.", ephemeral=True)
+                return
+            
+            # 간단한 확인 메시지만
+            await interaction.followup.send(f"🎲 믹스 {count}곡 추가 시작", ephemeral=True)
+            
+            # 백그라운드에서 믹스 추가 처리 (더 지연)
+            asyncio.create_task(self._process_mix_addition_delayed(video_id, count, user_id))
+            
+        except Exception as e:
+            logger.error(f"❌ 믹스 버튼 처리 오류: {e}")
+            try:
+                await interaction.followup.send(f"❌ 오류 발생", ephemeral=True)
+            except:
+                pass
+        finally:
+            # 처리 완료 표시는 백그라운드에서 처리
+            pass
+    
+    async def _process_mix_addition_delayed(self, video_id: str, count: int, user_id: int):
+        """백그라운드에서 믹스 추가 처리 - 재생 방해 최소화"""
+        try:
+            # 재생 중이면 더 긴 지연
+            if self.guild_player.vc and self.guild_player.vc.is_playing():
+                await asyncio.sleep(2.0)
+            else:
+                await asyncio.sleep(0.5)
+            
+            # 믹스에서 곡 추가
+            result = await self.guild_player.youtube_mix_queue.add_mix_songs_by_command(video_id, count)
+            
+            # 결과는 로그로만 확인
+            if result['success']:
+                logger.info(f"✅ 믹스 {result['added_count']}곡 즉시 추가 완료 (사용자: {user_id})")
+            else:
+                logger.warning(f"⚠️ 믹스 추가 실패: {result['message']} (사용자: {user_id})")
+                
+        except Exception as e:
+            logger.error(f"❌ 백그라운드 믹스 처리 오류: {e} (사용자: {user_id})")
+        finally:
+            # 처리 완료
+            if user_id in self._processing_users:
+                self._processing_users.remove(user_id)
+                

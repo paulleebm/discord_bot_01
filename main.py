@@ -5,11 +5,20 @@ from music.player import Player
 import signal
 import asyncio
 import logging
+import sys
 from datetime import datetime
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# 버전 확인
+print(f"🐍 Python 버전: {sys.version}")
+print(f"📦 Discord.py 버전: {discord.__version__}")
+
+# Discord.py 버전이 2.0 이상인지 확인
+if not discord.__version__.startswith('2.'):
+    print("⚠️ Discord.py 2.0+ 필요! pip install -U discord.py")
 
 # 인텐트 설정 (중요!)
 intents = discord.Intents.default()
@@ -25,35 +34,55 @@ bot = commands.Bot(
 )
 player = Player(bot)
 
-@bot.event
-async def on_ready():
-    """봇 준비 완료"""
-    print(f"✅ Logged in as {bot.user}")
-    print(f"🌐 {len(bot.guilds)}개 서버에 연결됨")
-    
-    # 플레이어 초기화
-    await player.initialize()
-    
-    # 슬래시 커맨드 강제 동기화
+# setup_hook 정의 (더 안정적인 동기화)
+async def setup_hook():
+    """봇 설정 후크 - 동기화 전용"""
     try:
         print("🔄 슬래시 커맨드 동기화 시작...")
         
-        # 글로벌 동기화 (모든 서버)
+        # 등록된 명령어 확인
+        all_commands = bot.tree.get_commands()
+        print(f"📋 등록될 명령어 수: {len(all_commands)}")
+        
+        for cmd in all_commands:
+            print(f"  - /{cmd.name}: {cmd.description}")
+        
+        if len(all_commands) == 0:
+            print("⚠️ 등록된 명령어가 없습니다!")
+            return
+        
+        # 글로벌 동기화
         synced = await bot.tree.sync()
-        print(f"✅ 글로벌 슬래시 커맨드 동기화 완료: {len(synced)}개")
+        print(f"✅ 글로벌 동기화 완료: {len(synced)}개 명령어")
         
-        # 각 서버별로도 동기화 (확실하게)
-        for guild in bot.guilds:
-            try:
-                guild_synced = await bot.tree.sync(guild=guild)
-                print(f"✅ 서버 {guild.name}: {len(guild_synced)}개 명령어 동기화")
-            except discord.HTTPException as e:
-                print(f"⚠️ 서버 {guild.name} 동기화 실패: {e}")
-        
-        print("🎉 모든 슬래시 커맨드 동기화 완료!")
-        
+        if len(synced) > 0:
+            print("🎉 새로운 명령어들이 동기화되었습니다!")
+            for cmd in synced:
+                # AppCommand 객체의 올바른 속성 접근
+                if hasattr(cmd, 'name'):
+                    print(f"  - {cmd.name}")
+                else:
+                    print(f"  - {str(cmd)}")
+        else:
+            print("⚠️ 동기화된 명령어가 없습니다.")
+            
     except Exception as e:
-        logger.error(f"❌ 슬래시 커맨드 동기화 실패: {e}")
+        print(f"❌ 동기화 실패: {e}")
+        import traceback
+        traceback.print_exc()
+
+# setup_hook 등록
+bot.setup_hook = setup_hook
+
+@bot.event  
+async def on_ready():
+    """봇 준비 완료 - 동기화는 setup_hook에서 처리"""
+    print(f"✅ Logged in as {bot.user}")
+    print(f"🌐 {len(bot.guilds)}개 서버에 연결됨")
+    
+    # 플레이어 초기화만
+    await player.initialize()
+    print("🎵 플레이어 초기화 완료")
 
 @bot.event
 async def on_guild_join(guild):
@@ -290,7 +319,220 @@ async def reset_music(interaction: discord.Interaction):
     
     await interaction.followup.send("✅ 음악 설정이 초기화되었습니다.", ephemeral=True)
 
+# === YouTube 믹스 관련 슬래시 커맨드 ===
+
+@bot.tree.command(
+    name="mix", 
+    description="현재 재생 중인 곡의 YouTube 믹스에서 곡들을 추가합니다"
+)
+async def mix_command(interaction: discord.Interaction, count: int = 10):
+    """YouTube 믹스에서 곡 추가"""
+    await interaction.response.defer(ephemeral=True)
+    
+    if count > 30:
+        await interaction.followup.send("❌ 최대 30곡까지만 추가할 수 있습니다.", ephemeral=True)
+        return
+    elif count < 1:
+        await interaction.followup.send("❌ 최소 1곡 이상 입력해주세요.", ephemeral=True)
+        return
+    
+    guild_player = player.get_player(interaction.guild_id)
+    if not guild_player:
+        await interaction.followup.send("❌ 음악 플레이어가 설정되지 않았습니다.", ephemeral=True)
+        return
+    
+    if not guild_player.current:
+        await interaction.followup.send("❌ 현재 재생 중인 곡이 없습니다.", ephemeral=True)
+        return
+    
+    current_track = guild_player.current[0]
+    current_url = current_track.get('video_url', '')
+    
+    if not current_url:
+        await interaction.followup.send("❌ 현재 곡의 URL을 찾을 수 없습니다.", ephemeral=True)
+        return
+    
+    video_id = guild_player.youtube_mix_queue.extract_video_id(current_url)
+    if not video_id:
+        await interaction.followup.send("❌ 현재 곡의 비디오 ID를 추출할 수 없습니다.", ephemeral=True)
+        return
+    
+    result = await guild_player.youtube_mix_queue.add_mix_songs_by_command(video_id, count)
+    
+    if result['success']:
+        embed = discord.Embed(
+            title="🎲 YouTube 믹스 추가 완료",
+            description=result['message'],
+            color=0x1DB954
+        )
+        embed.add_field(
+            name="📋 기준 곡",
+            value=f"{current_track['title'][:50]}",
+            inline=False
+        )
+        embed.add_field(
+            name="➕ 추가된 곡 수",
+            value=f"{result['added_count']}곡",
+            inline=True
+        )
+        embed.add_field(
+            name="👤 요청자",
+            value="YouTube 알고리즘",
+            inline=True
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    else:
+        await interaction.followup.send(f"❌ {result['message']}", ephemeral=True)
+
+@bot.tree.command(
+    name="mixurl", 
+    description="특정 YouTube URL의 믹스에서 곡들을 추가합니다"
+)
+async def mixurl_command(interaction: discord.Interaction, url: str, count: int = 10):
+    """특정 URL의 YouTube 믹스에서 곡 추가"""
+    await interaction.response.defer(ephemeral=True)
+    
+    if count > 30:
+        await interaction.followup.send("❌ 최대 30곡까지만 추가할 수 있습니다.", ephemeral=True)
+        return
+    elif count < 1:
+        await interaction.followup.send("❌ 최소 1곡 이상 입력해주세요.", ephemeral=True)
+        return
+    
+    guild_player = player.get_player(interaction.guild_id)
+    if not guild_player:
+        await interaction.followup.send("❌ 음악 플레이어가 설정되지 않았습니다.", ephemeral=True)
+        return
+    
+    video_id = guild_player.youtube_mix_queue.extract_video_id(url)
+    if not video_id:
+        await interaction.followup.send("❌ 유효하지 않은 YouTube URL입니다.", ephemeral=True)
+        return
+    
+    result = await guild_player.youtube_mix_queue.add_mix_songs_by_command(video_id, count)
+    
+    if result['success']:
+        embed = discord.Embed(
+            title="🎲 YouTube 믹스 추가 완료",
+            description=result['message'],
+            color=0x1DB954
+        )
+        embed.add_field(
+            name="📋 기준 URL",
+            value=f"[링크 보기]({url})",
+            inline=False
+        )
+        embed.add_field(
+            name="➕ 추가된 곡 수",
+            value=f"{result['added_count']}곡",
+            inline=True
+        )
+        embed.add_field(
+            name="👤 요청자",
+            value="YouTube 알고리즘",
+            inline=True
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    else:
+        await interaction.followup.send(f"❌ {result['message']}", ephemeral=True)
+
+@bot.tree.command(name="clear_mix_cache", description="믹스 캐시를 지웁니다 (관리자 전용)")
+async def clear_mix_cache(interaction: discord.Interaction):
+    """믹스 캐시 지우기"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 관리자 권한이 필요합니다.", ephemeral=True)
+        return
+    
+    guild_player = player.get_player(interaction.guild_id)
+    if guild_player and hasattr(guild_player, 'youtube_mix_queue'):
+        cache_count = len(guild_player.youtube_mix_queue.mix_cache)
+        stream_cache_count = len(guild_player.youtube_mix_queue.stream_cache)
+        guild_player.youtube_mix_queue.mix_cache.clear()
+        guild_player.youtube_mix_queue.stream_cache.clear()
+        await interaction.response.send_message(
+            f"🧹 믹스 캐시 {cache_count}개, 스트림 캐시 {stream_cache_count}개 항목이 지워졌습니다.", 
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message("❌ 플레이어를 찾을 수 없습니다.", ephemeral=True)
+
 # === 디버깅용 명령어 ===
+
+@bot.tree.command(name="debug_commands", description="등록된 모든 명령어를 확인합니다 (관리자 전용)")
+async def debug_commands(interaction: discord.Interaction):
+    """등록된 명령어 디버깅"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 관리자 권한이 필요합니다.", ephemeral=True)
+        return
+    
+    all_commands = bot.tree.get_commands()
+    
+    embed = discord.Embed(
+        title="🔍 등록된 슬래시 명령어",
+        description=f"총 {len(all_commands)}개의 명령어가 등록됨",
+        color=0x00ff00
+    )
+    
+    command_list = ""
+    for i, cmd in enumerate(all_commands, 1):
+        command_list += f"{i}. `/{cmd.name}` - {cmd.description}\n"
+        if len(command_list) > 1800:  # 임베드 길이 제한
+            command_list += "... (더 많은 명령어 있음)"
+            break
+    
+    embed.add_field(name="명령어 목록", value=command_list or "명령어가 없습니다.", inline=False)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="force_sync", description="모든 슬래시 명령어를 강제로 동기화합니다 (관리자 전용)")
+async def force_sync_all(interaction: discord.Interaction):
+    """모든 서버에 슬래시 명령어 강제 동기화"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 관리자 권한이 필요합니다.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # 글로벌 동기화
+        global_synced = await bot.tree.sync()
+        
+        # 현재 서버 동기화
+        guild_synced = await bot.tree.sync(guild=interaction.guild)
+        
+        embed = discord.Embed(
+            title="🔄 강제 동기화 완료",
+            color=0x00ff00
+        )
+        embed.add_field(name="글로벌", value=f"{len(global_synced)}개 명령어", inline=True)
+        embed.add_field(name="현재 서버", value=f"{len(guild_synced)}개 명령어", inline=True)
+        embed.add_field(
+            name="⚠️ 주의사항", 
+            value="명령어가 나타나는데 최대 1시간까지 걸릴 수 있습니다.", 
+            inline=False
+        )
+        
+        # 글로벌 동기화된 명령어 목록
+        if global_synced:
+            global_names = []
+            for cmd in global_synced:
+                if hasattr(cmd, 'name'):
+                    global_names.append(cmd.name)
+                else:
+                    global_names.append(str(cmd))
+            
+            embed.add_field(
+                name="글로벌 동기화된 명령어",
+                value=", ".join(global_names[:10]) if global_names else "없음",
+                inline=False
+            )
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ 동기화 실패: {e}", ephemeral=True)
+        import traceback
+        traceback.print_exc()
 
 @bot.tree.command(name="sync_commands", description="슬래시 명령어를 강제로 동기화합니다 (관리자 전용)")
 async def sync_commands(interaction: discord.Interaction):
@@ -313,6 +555,107 @@ async def ping(interaction: discord.Interaction):
     """핑 테스트"""
     latency = round(bot.latency * 1000)
     await interaction.response.send_message(f"🏓 Pong! {latency}ms", ephemeral=True)
+
+# === 임시 텍스트 명령어들 (디버깅용) ===
+
+@bot.command(name='명령어확인')
+async def check_commands(ctx):
+    """등록된 슬래시 명령어 확인"""
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("❌ 관리자 권한이 필요합니다.")
+        return
+    
+    commands = bot.tree.get_commands()
+    
+    embed = discord.Embed(
+        title="📋 등록된 슬래시 명령어",
+        description=f"총 {len(commands)}개",
+        color=0x00ff00
+    )
+    
+    command_text = ""
+    for cmd in commands:
+        command_text += f"• **/{cmd.name}** - {cmd.description}\n"
+    
+    if command_text:
+        embed.add_field(name="명령어 목록", value=command_text[:1024], inline=False)
+    else:
+        embed.add_field(name="⚠️", value="등록된 명령어가 없습니다.", inline=False)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='강제동기화')
+async def force_sync_now(ctx):
+    """강제 동기화"""
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("❌ 관리자 권한이 필요합니다.")
+        return
+    
+    try:
+        await ctx.send("🔄 동기화 시작...")
+        
+        # 등록된 명령어 확인
+        commands = bot.tree.get_commands()
+        
+        if len(commands) == 0:
+            await ctx.send("❌ 등록된 명령어가 없습니다! 봇을 재시작해주세요.")
+            return
+        
+        # 동기화 실행
+        synced = await bot.tree.sync()
+        
+        embed = discord.Embed(
+            title="✅ 동기화 완료",
+            color=0x00ff00
+        )
+        embed.add_field(name="동기화된 명령어", value=f"{len(synced)}개", inline=True)
+        embed.add_field(name="등록된 명령어", value=f"{len(commands)}개", inline=True)
+        
+        if len(synced) != len(commands):
+            embed.add_field(
+                name="⚠️ 주의", 
+                value="동기화된 명령어 수가 다릅니다.", 
+                inline=False
+            )
+        
+        # 동기화된 명령어 목록 표시
+        synced_names = []
+        for cmd in synced:
+            if hasattr(cmd, 'name'):
+                synced_names.append(cmd.name)
+            else:
+                synced_names.append(str(cmd))
+        
+        if synced_names:
+            embed.add_field(
+                name="동기화된 명령어 목록",
+                value=", ".join(synced_names[:10]),  # 최대 10개까지만 표시
+                inline=False
+            )
+        
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        await ctx.send(f"❌ 동기화 실패: {e}")
+        import traceback
+        traceback.print_exc()
+
+# 명령어 등록 상태를 실시간으로 확인하는 코드
+def check_command_registration():
+    """명령어 등록 상태 확인"""
+    commands = bot.tree.get_commands()
+    print(f"\n🔍 현재 등록된 명령어: {len(commands)}개")
+    
+    expected_commands = ['mix', 'mixurl', 'setup_music', 'status', 'queue', 'debug_commands', 'force_sync']
+    registered_commands = [cmd.name for cmd in commands]
+    
+    for expected in expected_commands:
+        if expected in registered_commands:
+            print(f"  ✅ /{expected}")
+        else:
+            print(f"  ❌ /{expected} (누락됨)")
+    
+    print("")
 
 # 종료 처리
 async def cleanup():
@@ -348,6 +691,10 @@ async def main():
         logger.error(f"❌ 봇 실행 오류: {e}")
     finally:
         await cleanup()
+
+# 명령어 등록 상태 확인 (봇 시작 전)
+print("🔍 명령어 등록 상태 확인:")
+check_command_registration()
 
 if __name__ == "__main__":
     try:
