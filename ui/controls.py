@@ -1,8 +1,8 @@
-# ui/controls.py - 최종 버전 (효율적인 믹스 버튼 포함)
+# ui/controls.py - 완전판
 
 import discord
 from discord.ui import View, Button, Select
-from discord import SelectOption
+from discord import SelectOption, ButtonStyle
 from datetime import timedelta
 import asyncio
 import logging
@@ -86,7 +86,7 @@ class MusicView(View):
             self.add_item(MusicDropdown(guild_player))
 
     async def _check_interaction_cooldown(self, interaction: discord.Interaction, cooldown_seconds: float = 3.0) -> bool:
-        """상호작용 쿨다운 체크 - 재생 중일 때 더 강화"""
+        """상호작용 쿨다운 체크"""
         user_id = interaction.user.id
         current_time = time.time()
         
@@ -116,10 +116,101 @@ class MusicView(View):
         self._processing_users.add(user_id)  # 처리 시작
         return True
 
+    @discord.ui.button(label="⏸️", style=ButtonStyle.secondary, row=0)
+    async def pause_button(self, interaction: discord.Interaction, button: Button):
+        """정지/재생 버튼"""
+        try:
+            if not await self._check_interaction_cooldown(interaction, 2.0):
+                return
+            
+            if not self.guild_player.vc:
+                await interaction.response.send_message("❌ 음성 채널에 연결되지 않았습니다.", ephemeral=True)
+                return
+            
+            if self.guild_player.vc.is_playing():
+                self.guild_player.vc.pause()
+                button.label = "▶️ 재생"
+                await interaction.response.edit_message(view=self)
+            elif self.guild_player.vc.is_paused():
+                self.guild_player.vc.resume()
+                button.label = "⏸️ 정지"
+                await interaction.response.edit_message(view=self)
+            else:
+                await interaction.response.send_message("⏸️ 재생 중인 음악이 없습니다.", ephemeral=True)
+                
+        except Exception as e:
+            logger.error(f"❌ 정지 버튼 오류: {e}")
+            await interaction.response.send_message("❌ 오류가 발생했습니다.", ephemeral=True)
+        finally:
+            if interaction.user.id in self._processing_users:
+                self._processing_users.remove(interaction.user.id)
+
+    @discord.ui.button(label="⏭️", style=ButtonStyle.secondary, row=0)
+    async def skip_button(self, interaction: discord.Interaction, button: Button):
+        """건너뛰기 버튼"""
+        try:
+            if not await self._check_interaction_cooldown(interaction, 2.0):
+                return
+            
+            if not self.guild_player.vc or not self.guild_player.vc.is_playing():
+                await interaction.response.send_message("⏸️ 재생 중인 음악이 없습니다.", ephemeral=True)
+                return
+            
+            # 현재 재생 중인 곡 정보
+            current_title = "알 수 없음"
+            if self.guild_player.current:
+                current_title = self.guild_player.current[0].get('title', '알 수 없음')[:30]
+            
+            self.guild_player.vc.stop()
+            await interaction.response.send_message(f"⏭️ '{current_title}'을(를) 건너뛰었습니다.", ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"❌ 건너뛰기 버튼 오류: {e}")
+            await interaction.response.send_message("❌ 오류가 발생했습니다.", ephemeral=True)
+        finally:
+            if interaction.user.id in self._processing_users:
+                self._processing_users.remove(interaction.user.id)
+
+
+    @discord.ui.button(label="+20", style=ButtonStyle.success, row=0)
+    async def mix20_button(self, interaction: discord.Interaction, button: Button):
+        """믹스 20곡 추가"""
+        await self._handle_mix_button(interaction, 20)
+        
+    @discord.ui.button(label="🛑", style=ButtonStyle.danger, row=0)
+    async def stop_button(self, interaction: discord.Interaction, button: Button):
+        """완전 중지 버튼"""
+        try:
+            if not await self._check_interaction_cooldown(interaction, 3.0):
+                return
+            
+            if not self.guild_player.vc:
+                await interaction.response.send_message("❌ 음성 채널에 연결되지 않았습니다.", ephemeral=True)
+                return
+            
+            # 완전 중지
+            self.guild_player.queue.clear()
+            self.guild_player.current = []
+            if self.guild_player.vc.is_playing():
+                self.guild_player.vc.stop()
+            
+            await self.guild_player.update_ui()
+            await interaction.response.send_message("🛑 플레이어를 완전히 중지했습니다.", ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"❌ 중지 버튼 오류: {e}")
+            await interaction.response.send_message("❌ 오류가 발생했습니다.", ephemeral=True)
+        finally:
+            if interaction.user.id in self._processing_users:
+                self._processing_users.remove(interaction.user.id)
+
     async def _handle_mix_button(self, interaction: discord.Interaction, count: int):
-        """믹스 버튼 처리 로직 - 재생 방해 최소화"""
+        """믹스 버튼 처리 로직"""
         user_id = interaction.user.id
         try:
+            if not await self._check_interaction_cooldown(interaction, 5.0):
+                return
+            
             await interaction.response.defer(ephemeral=True)
             
             # 현재 재생 중인 곡 확인
@@ -149,7 +240,7 @@ class MusicView(View):
             # 간단한 확인 메시지만
             await interaction.followup.send(f"🎲 믹스 {count}곡 추가 시작", ephemeral=True)
             
-            # 백그라운드에서 믹스 추가 처리 (더 지연)
+            # 백그라운드에서 믹스 추가 처리
             asyncio.create_task(self._process_mix_addition_delayed(video_id, count, user_id))
             
         except Exception as e:
@@ -159,11 +250,11 @@ class MusicView(View):
             except:
                 pass
         finally:
-            # 처리 완료 표시는 백그라운드에서 처리
+            # 처리 완료는 백그라운드에서 처리
             pass
     
     async def _process_mix_addition_delayed(self, video_id: str, count: int, user_id: int):
-        """백그라운드에서 믹스 추가 처리 - 재생 방해 최소화"""
+        """백그라운드에서 믹스 추가 처리"""
         try:
             # 재생 중이면 더 긴 지연
             if self.guild_player.vc and self.guild_player.vc.is_playing():
@@ -186,4 +277,3 @@ class MusicView(View):
             # 처리 완료
             if user_id in self._processing_users:
                 self._processing_users.remove(user_id)
-                
